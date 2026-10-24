@@ -17,8 +17,8 @@ const en: typeof ptBR = {
     status: 'The server answered with error {status}.',
   },
   home: {
-    title: 'Open a note by name',
-    description: 'Everyone with the same name edits it together, in real time.',
+    title: 'Write without distractions',
+    description: 'Pick a name, open the note and start writing. Nothing but your text.',
     label: 'Note name',
     placeholder: 'college/calculus',
     open: 'Open',

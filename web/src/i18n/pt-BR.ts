@@ -14,8 +14,8 @@ export default {
     status: 'O servidor respondeu com erro {status}.',
   },
   home: {
-    title: 'Abra uma nota pelo nome',
-    description: 'Quem tiver o mesmo nome edita junto, em tempo real.',
+    title: 'Escreva sem distração',
+    description: 'Escolha um nome, abra a nota e comece a escrever. Nada além do seu texto.',
     label: 'Nome da nota',
     placeholder: 'faculdade/calculo',
     open: 'Abrir',
