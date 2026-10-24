@@ -16,12 +16,18 @@ import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { errorMessage, removePassword, setPassword } from '@/lib/api'
 import { deriveKeys, encrypt, randomSalt, toB64url } from '@/lib/crypto'
-import type { Resume } from '@/lib/relock'
+import { type Creds, type Resume, withFreshToken } from '@/lib/relock'
 import { nextPaint } from '@/lib/utils'
 
-const props = defineProps<{ name: string; protected: boolean; token?: string; doc: Y.Doc }>()
-/** Emitted as the request starts: the server closes our socket (4409) before it answers. */
-const emit = defineEmits<{ change: [next: Promise<Resume>] }>()
+const props = defineProps<{ name: string; protected: boolean; creds: Creds; doc: Y.Doc }>()
+const emit = defineEmits<{
+  /** Emitted as the request starts: the server closes our socket (4409) before it answers. */
+  change: [next: Promise<Resume>]
+  /** Our token had expired and was renewed with the kept authKey. */
+  token: [token: string]
+}>()
+const authed = <T,>(request: (token?: string) => Promise<T>) =>
+  withFreshToken(props.name, props.creds, request, (token) => emit('token', token))
 const open = defineModel<boolean>('open', { required: true })
 const { t } = useI18n()
 
@@ -66,11 +72,8 @@ function submitPassword() {
       const salt = randomSalt()
       const { authKey, encKey } = await deriveKeys(password.value, salt)
       const snapshot = await encrypt(encKey, Y.encodeStateAsUpdate(props.doc), props.name)
-      const session = await setPassword(
-        props.name,
-        { salt: toB64url(salt), authKey: toB64url(authKey), snapshot: toB64url(snapshot) },
-        props.token,
-      )
+      const body = { salt: toB64url(salt), authKey: toB64url(authKey), snapshot: toB64url(snapshot) }
+      const session = await authed((token) => setPassword(props.name, body, token))
       const info = { name: props.name, protected: true, salt: toB64url(salt) }
       return { info, creds: { token: session.token, encKey, authKey } }
     },
@@ -82,7 +85,8 @@ function remove() {
   if (busy.value) return
   void run(async () => {
     // Sent in the clear on purpose: without a password the server keeps readable state.
-    await removePassword(props.name, toB64url(Y.encodeStateAsUpdate(props.doc)), props.token)
+    const state = toB64url(Y.encodeStateAsUpdate(props.doc))
+    await authed((token) => removePassword(props.name, state, token))
     return { info: { name: props.name, protected: false, salt: null }, creds: {} }
   }, t('password.removeDone'))
 }

@@ -1,15 +1,16 @@
+import { AxiosError, type AxiosResponse } from 'axios'
 import { describe, expect, it, vi } from 'vitest'
 import type { PadInfo } from './api'
-import { afterLock, type Creds, type Resume } from './relock'
+import { afterLock, type Creds, type Resume, withFreshToken } from './relock'
 
 const info: PadInfo = { name: 'a/b', protected: true, salt: 'salt1' }
 const encKey = {} as CryptoKey
 const creds: Creds = { token: 'old', encKey, authKey: new Uint8Array([1, 2, 3]) }
 
-function fakeApi(pad: PadInfo, unlock: () => Promise<{ token: string; expiresAt: string }>) {
+function fakeApi(pad: PadInfo, unlock: () => Promise<{ token: string; expiresAt: number }>) {
   return { getPad: vi.fn(async () => pad), unlock: vi.fn(unlock) }
 }
-const ok = async () => ({ token: 'new', expiresAt: '' })
+const ok = async () => ({ token: 'new', expiresAt: 0 })
 
 describe('afterLock', () => {
   it('uses our own password change (its 4409) instead of the lock screen', async () => {
@@ -50,5 +51,51 @@ describe('afterLock', () => {
     const open = { name: 'a/b', protected: false, salt: null }
     const r = await afterLock(info, creds, null, fakeApi(open, ok))
     expect(r).toEqual({ info: open, creds: {} })
+  })
+})
+
+describe('withFreshToken', () => {
+  const status = (n: number) =>
+    new AxiosError('fail', String(n), undefined, undefined, { status: n } as AxiosResponse)
+
+  it('passes the current token and does not unlock when the request succeeds', async () => {
+    const unlock = vi.fn(ok)
+    const request = vi.fn(async (token?: string) => token)
+    expect(await withFreshToken('a/b', creds, request, vi.fn(), { unlock })).toBe('old')
+    expect(unlock).not.toHaveBeenCalled()
+  })
+
+  it('401 (token expired): unlocks again with the kept authKey and retries once', async () => {
+    const unlock = vi.fn(ok)
+    const onToken = vi.fn()
+    const request = vi
+      .fn<(token?: string) => Promise<string>>()
+      .mockRejectedValueOnce(status(401))
+      .mockResolvedValueOnce('done')
+    expect(await withFreshToken('a/b', creds, request, onToken, { unlock })).toBe('done')
+    expect(unlock).toHaveBeenCalledWith('a/b', 'AQID')
+    expect(onToken).toHaveBeenCalledWith('new')
+    expect(request.mock.calls).toEqual([['old'], ['new']])
+  })
+
+  it('fails with the unlock error when the silent unlock fails', async () => {
+    const wrong = status(401)
+    const unlock = vi.fn(() => Promise.reject(wrong))
+    const request = vi.fn(() => Promise.reject(status(401)))
+    await expect(withFreshToken('a/b', creds, request, vi.fn(), { unlock })).rejects.toBe(wrong)
+    expect(request).toHaveBeenCalledTimes(1)
+  })
+
+  it('does not retry other errors, or without a kept authKey', async () => {
+    const unlock = vi.fn(ok)
+    const e500 = status(500)
+    await expect(
+      withFreshToken('a/b', creds, () => Promise.reject(e500), vi.fn(), { unlock }),
+    ).rejects.toBe(e500)
+    const e401 = status(401)
+    await expect(
+      withFreshToken('a/b', { token: 'old' }, () => Promise.reject(e401), vi.fn(), { unlock }),
+    ).rejects.toBe(e401)
+    expect(unlock).not.toHaveBeenCalled()
   })
 })

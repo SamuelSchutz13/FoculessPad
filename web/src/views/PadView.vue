@@ -144,9 +144,10 @@ onBeforeUnmount(teardown)
         v-model:open="dialogOpen"
         :name="info.name"
         :protected="info.protected"
-        :token="creds.token"
+        :creds="creds"
         :doc="doc"
         @change="onPasswordChange"
+        @token="(token) => (creds = { ...creds, token })"
       />
     </template>
     <UnlockForm

@@ -1,4 +1,4 @@
-import { getPad, type PadInfo, unlock } from './api'
+import { errorStatus, getPad, type PadInfo, unlock } from './api'
 import { toB64url } from './crypto'
 
 /** What a PadProvider needs (empty for an open pad), kept in memory only. */
@@ -46,4 +46,26 @@ export async function afterLock(
     }
   }
   return { info: fresh, creds: null }
+}
+
+/**
+ * Runs a request that needs the session token. The open socket never renews it, so after
+ * SESSION_TTL_MINUTES the server answers 401: unlock again with the kept authKey, report the
+ * new token, and retry once. Any other failure (or a failed unlock) is thrown to the caller.
+ */
+export async function withFreshToken<T>(
+  name: string,
+  creds: Creds,
+  request: (token?: string) => Promise<T>,
+  onToken: (token: string) => void,
+  api = { unlock },
+): Promise<T> {
+  try {
+    return await request(creds.token)
+  } catch (error) {
+    if (errorStatus(error) !== 401 || !creds.authKey) throw error
+  }
+  const { token } = await api.unlock(name, toB64url(creds.authKey))
+  onToken(token)
+  return request(token)
 }

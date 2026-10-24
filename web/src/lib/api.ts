@@ -18,7 +18,8 @@ export interface PadInfo {
 
 export interface Session {
   token: string
-  expiresAt: string
+  /** ms since the epoch. */
+  expiresAt: number
 }
 
 // encodeURIComponent: "a/b" travels as one path segment (a%2Fb), like the API expects.
