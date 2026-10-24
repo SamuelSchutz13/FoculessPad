@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { EyeOff, Lock, UserX } from '@lucide/vue'
 import { useTitle } from '@vueuse/core'
 import { computed } from 'vue'
 import { useI18n } from 'vue-i18n'
@@ -12,6 +13,12 @@ const { t } = useI18n()
 
 // Tab title follows the language.
 useTitle(computed(() => `${t('app.homeTitle')} — FoculessPad`))
+
+const promises = [
+  { key: 'app.noSignup', icon: UserX },
+  { key: 'app.noTelemetry', icon: EyeOff },
+  { key: 'app.endToEnd', icon: Lock },
+]
 </script>
 
 <template>
@@ -35,9 +42,16 @@ useTitle(computed(() => `${t('app.homeTitle')} — FoculessPad`))
     </main>
 
     <footer class="border-t">
-      <p class="mx-auto max-w-5xl px-4 py-6 text-center text-sm text-muted-foreground">
-        {{ t('app.footer') }}
-      </p>
+      <ul class="mx-auto flex max-w-5xl flex-wrap justify-center gap-2 px-4 py-6">
+        <li
+          v-for="promise in promises"
+          :key="promise.key"
+          class="inline-flex items-center gap-1.5 rounded-full bg-secondary px-3 py-1 text-sm font-medium text-secondary-foreground"
+        >
+          <component :is="promise.icon" class="size-4" aria-hidden="true" />
+          {{ t(promise.key) }}
+        </li>
+      </ul>
     </footer>
 
     <Toaster rich-colors position="top-center" :theme="isDark ? 'dark' : 'light'" />

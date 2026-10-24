@@ -1,5 +1,4 @@
 <script setup lang="ts">
-import { EyeOff, Lock, UserX } from '@lucide/vue'
 import { ref } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useRouter } from 'vue-router'
@@ -12,12 +11,6 @@ const { t } = useI18n()
 const router = useRouter()
 const name = ref('')
 const invalid = ref(false)
-
-const promises = [
-  { key: 'home.noSignup', icon: UserX },
-  { key: 'home.noTelemetry', icon: EyeOff },
-  { key: 'home.endToEnd', icon: Lock },
-]
 
 function open() {
   try {
@@ -33,16 +26,6 @@ function open() {
     <div class="grid gap-2 text-center">
       <h1 class="text-3xl font-bold">{{ t('home.title') }}</h1>
       <p class="text-muted-foreground">{{ t('home.description') }}</p>
-      <ul class="mt-2 flex flex-wrap justify-center gap-2">
-        <li
-          v-for="promise in promises"
-          :key="promise.key"
-          class="inline-flex items-center gap-1.5 rounded-full bg-secondary px-3 py-1 text-sm font-medium text-secondary-foreground"
-        >
-          <component :is="promise.icon" class="size-4" aria-hidden="true" />
-          {{ t(promise.key) }}
-        </li>
-      </ul>
     </div>
     <form class="grid gap-2" novalidate @submit.prevent="open">
       <Label for="pad-name">{{ t('home.label') }}</Label>
