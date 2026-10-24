@@ -17,8 +17,12 @@ const en: typeof ptBR = {
     status: 'The server answered with error {status}.',
   },
   home: {
-    title: 'Write without distractions',
-    description: 'Pick a name, open the note and start writing. Nothing but your text.',
+    title: 'Your notes, private',
+    description:
+      'Pick a name and start writing. With a password, the note is encrypted in your browser and not even the server can read it.',
+    noSignup: 'No sign-up',
+    noTelemetry: 'No telemetry',
+    endToEnd: 'End-to-end encryption',
     label: 'Note name',
     placeholder: 'college/calculus',
     open: 'Open',

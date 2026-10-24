@@ -14,8 +14,12 @@ export default {
     status: 'O servidor respondeu com erro {status}.',
   },
   home: {
-    title: 'Escreva sem distração',
-    description: 'Escolha um nome, abra a nota e comece a escrever. Nada além do seu texto.',
+    title: 'Suas notas, com privacidade',
+    description:
+      'Escolha um nome e comece a escrever. Com senha, a nota é cifrada no seu navegador e nem o servidor consegue ler.',
+    noSignup: 'Sem cadastro',
+    noTelemetry: 'Sem telemetria',
+    endToEnd: 'Criptografia de ponta a ponta',
     label: 'Nome da nota',
     placeholder: 'faculdade/calculo',
     open: 'Abrir',
