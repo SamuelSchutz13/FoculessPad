@@ -60,6 +60,15 @@ describe('Pads (e2e)', () => {
     expect((await call('a/password', 'DELETE', { state: b64(2, 0) }, a.token)).status).toBe(204);
   });
 
+  it('400 when removing a password with a state that is not a Yjs update', async () => {
+    const { token } = await (
+      await call('bad-state/password', 'PUT', { salt, authKey, snapshot: b64(4, 1) })
+    ).json();
+    const res = await call('bad-state/password', 'DELETE', { state: 'A' }, token);
+    expect(res.status).toBe(400);
+    expect((await (await call('bad-state', 'GET')).json()).protected).toBe(true);
+  });
+
   it('accepts a snapshot of exactly maxPadSizeKb', async () => {
     const res = await call('big/password', 'PUT', {
       salt,

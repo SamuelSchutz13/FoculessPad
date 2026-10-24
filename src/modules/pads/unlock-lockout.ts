@@ -7,6 +7,8 @@ const LOCK_MS = 15 * 60_000;
 export class UnlockLockout {
   // shortcut: in memory per process and never pruned (one small entry per failed pad),
   // restarts clear locks; move to the database/Redis if the API runs on several instances.
+  // shortcut: the failure counter never decays (10 failures spread over days still lock) and
+  // lives in memory only; add a time window if legitimate users get locked out.
   private readonly state = new Map<string, { failures: number; lockedUntil: number }>();
 
   constructor(private readonly now: () => number = Date.now) {}

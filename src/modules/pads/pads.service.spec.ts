@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
-import { HttpException, UnauthorizedException } from '@nestjs/common';
+import { BadRequestException, HttpException, UnauthorizedException } from '@nestjs/common';
 import { DataSource } from 'typeorm';
+import * as Y from 'yjs';
 import { PadUpdate } from './pad-update.entity';
 import { Pad } from './pad.entity';
 import { PadsService } from './pads.service';
@@ -12,6 +13,19 @@ const sha = (b: Buffer) => createHash('sha256').update(b).digest();
 const authKey = Buffer.alloc(32, 1);
 const salt = Buffer.alloc(16, 2);
 const snapshot = Buffer.from([1, 2, 3]);
+const yState = (text: string) => {
+  const doc = new Y.Doc();
+  doc.getText('t').insert(0, text);
+  return Buffer.from(Y.encodeStateAsUpdate(doc));
+};
+/** Well-formed, but its first struct is at clock 1: applying it leaves pendingStructs. */
+const gapped = () => {
+  const doc = new Y.Doc();
+  doc.getText('t').insert(0, 'a');
+  const sv = Y.encodeStateVector(doc);
+  doc.getText('t').insert(1, 'b');
+  return Buffer.from(Y.encodeStateAsUpdate(doc, sv));
+};
 
 describe('PadsService', () => {
   let ds: DataSource;
@@ -78,11 +92,42 @@ describe('PadsService', () => {
     const { token } = await service.setPassword('a', { salt, authKey, snapshot });
     const hook = jest.fn();
     service.onKeyChange = hook;
-    await service.removePassword('a', token, Buffer.from('plain'));
+    const state = yState('plain');
+    await service.removePassword('a', token, state);
     const pad = await service.findOrNull('a');
     expect(pad).toMatchObject({ verifier: null, salt: null, snapshot: null, keyVersion: 2 });
-    expect(pad?.state?.toString()).toBe('plain');
+    expect(pad?.state?.equals(state)).toBe(true);
     expect(hook).toHaveBeenCalledWith('a');
+  });
+
+  it('removePassword accepts the 2-byte update of an empty doc', async () => {
+    const { token } = await service.setPassword('a', { salt, authKey, snapshot });
+    const empty = Buffer.from(Y.encodeStateAsUpdate(new Y.Doc()));
+    await expect(service.removePassword('a', token, empty)).resolves.toBeUndefined();
+    expect((await service.findOrNull('a'))?.verifier).toBeNull();
+  });
+
+  it.each([
+    ['"A" (0 bytes)', Buffer.from('A', 'base64url')],
+    ['0 bytes', Buffer.alloc(0)],
+    ['3 random bytes', Buffer.from([0xc3, 0x7f, 0x91])],
+    ['an update with missing dependencies', gapped()],
+  ])('removePassword rejects %s as state with 400 and keeps the pad protected', async (_, bad) => {
+    const { token } = await service.setPassword('a', { salt, authKey, snapshot });
+    const hook = jest.fn();
+    service.onKeyChange = hook;
+    await expect(service.removePassword('a', token, bad)).rejects.toThrow(BadRequestException);
+    const pad = await service.findOrNull('a');
+    expect(pad?.verifier?.equals(sha(authKey))).toBe(true);
+    expect(pad).toMatchObject({ state: null, keyVersion: 1 });
+    expect(hook).not.toHaveBeenCalled();
+  });
+
+  it('setPassword rejects an empty snapshot with 400', async () => {
+    await expect(
+      service.setPassword('a', { salt, authKey, snapshot: Buffer.alloc(0) }),
+    ).rejects.toThrow(BadRequestException);
+    expect(await service.findOrNull('a')).toBeNull();
   });
 
   it('a throwing onKeyChange hook does not fail a committed password change', async () => {

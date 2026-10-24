@@ -1,4 +1,5 @@
 import { EventEmitter } from 'node:events';
+import { Logger } from '@nestjs/common';
 import * as decoding from 'lib0/decoding';
 import * as encoding from 'lib0/encoding';
 import { DataSource } from 'typeorm';
@@ -277,6 +278,18 @@ describe('RoomsService', () => {
     }
   });
 
+  it('a stored state that is not a Yjs update closes the join with 1011 and is kept', async () => {
+    const broken = Buffer.from([0xc3, 0x7f, 0x91]);
+    await ds.getRepository(Pad).save({ name: 'bad', state: broken });
+    const error = jest.spyOn(Logger.prototype, 'error').mockImplementation(() => undefined);
+    const s = await join('bad', false, 0);
+    expect(s.closeCode).toBe(1011);
+    expect(error).toHaveBeenCalledWith(expect.stringContaining('"bad"'), expect.anything());
+    error.mockRestore();
+    await drain();
+    expect((await pads.findOrNull('bad'))?.state?.equals(broken)).toBe(true);
+  });
+
   it('closes a socket sending more than 60 SYNC messages per second with 1008', async () => {
     const a = await join('fast', false, 0);
     const step1 = msg(MSG.SYNC, (e) => syncProtocol.writeSyncStep1(e, new Y.Doc()));
@@ -395,6 +408,35 @@ describe('RoomsService', () => {
       await recv(s2, syncUpdate(u0)); // the small clock-0 update finds nothing pending
       expect(s2.closeCode).toBeUndefined();
       expect(await afterFlush('pb', s2)).toBe('k' + 'w'.repeat(2 * N));
+    });
+
+    it('one client in two blocks (Yjs keeps only the last: a gap) is refused with 4413', async () => {
+      const a = new Y.Doc();
+      a.clientID = 77;
+      a.getText('t').insert(0, 'A'.repeat(10));
+      const u1 = Y.encodeStateAsUpdate(a); // clocks 0-9
+      const sv1 = Y.encodeStateVector(a);
+      a.getText('t').insert(10, 'B'.repeat(2 * N));
+      const u2 = Y.encodeStateAsUpdate(a, sv1); // clocks 10+
+      const c = new Y.Doc();
+      c.clientID = 5;
+      c.getText('t').insert(0, 'legit');
+      // Each update is [1 client block, the block, empty delete set]: keep only the block.
+      const block = (u: Uint8Array) => u.subarray(1, -1);
+      const evil = Uint8Array.from([
+        3,
+        ...block(u1),
+        ...block(u2),
+        ...block(Y.encodeStateAsUpdate(c)),
+        0,
+      ]);
+
+      const s1 = await join('dup', false, 0);
+      const s2 = await join('dup', false, 0);
+      await recv(s1, syncUpdate(evil));
+      expect(s1.closeCode).toBe(CLOSE.TOO_LARGE);
+      expect(syncUpdatesSeen(s2)).toBe(0); // refused before applying: nothing broadcast
+      expect(await afterFlush('dup', s2)).toBe('');
     });
 
     it('normal concurrent edits from two synced clients are unaffected', async () => {
