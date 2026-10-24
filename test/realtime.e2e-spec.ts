@@ -258,7 +258,7 @@ describe('Realtime (e2e)', () => {
     await until(() => presence(a) === 2 && presence(b) === 2);
     for (let i = 0; i < 100 && a.closeCode === undefined; i++) {
       a.doc.getText('t').insert(0, 'y'.repeat(1000)); // each far under the per-message limit
-      await new Promise((r) => setTimeout(r, 50)); // under the 30 SYNC msg/s limit
+      await new Promise((r) => setTimeout(r, 50)); // under the 60 SYNC msg/s limit
     }
     await until(() => a.closeCode !== undefined);
     expect(a.closeCode).toBe(4413);

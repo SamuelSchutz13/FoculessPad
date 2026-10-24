@@ -18,7 +18,7 @@ const COMPACT_AFTER = 200;
 const SPLIT_BYTES = 64;
 // shortcut: per-socket fixed window in memory; move to a shared limiter with several instances.
 /** Open pads only: each SYNC message may cost an O(doc) exact size check. */
-const MAX_SYNC_MESSAGES_PER_SECOND = 30;
+const MAX_SYNC_MESSAGES_PER_SECOND = 60;
 
 /**
  * Upper bound of how much applying `update` grows Y.encodeStateAsUpdate(doc). The update's own
@@ -34,6 +34,33 @@ function growthBound(update: Uint8Array): number {
   return update.length + SPLIT_BYTES * (2 * (structs.length + ranges) + 1);
 }
 const maxBytes = () => env.maxPadSizeKb * 1024;
+
+/**
+ * True if applying `update` would leave Yjs pending state (pendingStructs/pendingDs): a gap in
+ * a client's clocks, or an origin, rightOrigin, parent or delete range that neither the doc nor
+ * the update provides. Pending data integrates later, uncharged by growthBound, so it is refused.
+ */
+function hasMissingDeps(doc: Y.Doc, update: Uint8Array): boolean {
+  const { structs, ds } = Y.decodeUpdate(update);
+  const reach = Y.decodeStateVector(Y.encodeStateVector(doc));
+  const has = (id: Y.ID | null) => !id || id.clock < (reach.get(id.client) ?? 0);
+  for (const st of structs) {
+    if (st instanceof Y.Skip || st.id.clock > (reach.get(st.id.client) ?? 0)) return true;
+    reach.set(st.id.client, Math.max(reach.get(st.id.client) ?? 0, st.id.clock + st.length));
+  }
+  for (const st of structs) {
+    if (!(st instanceof Y.Item)) continue;
+    const parent = st.parent instanceof Y.ID ? st.parent : null;
+    if (!has(st.origin) || !has(st.rightOrigin) || !has(parent)) return true;
+  }
+  for (const [client, ranges] of ds.clients) {
+    for (const r of ranges) if (r.clock + r.len > (reach.get(client) ?? 0)) return true;
+  }
+  return false;
+}
+
+const hasPending = (doc: Y.Doc) =>
+  doc.store.pendingStructs !== null || doc.store.pendingDs !== null;
 
 interface Room {
   name: string;
@@ -216,17 +243,26 @@ export class RoomsService implements OnModuleDestroy {
    */
   private applyCapped(room: Room, update: Uint8Array, origin: WebSocket): void {
     const doc = room.doc!;
+    // Synced clients never send updates with missing dependencies; one that does resyncs.
+    if (hasMissingDeps(doc, update)) throw new TooLarge();
     let next = room.size + growthBound(update);
     if (next > maxBytes()) {
       const copy = new Y.Doc();
       Y.applyUpdate(copy, Y.encodeStateAsUpdate(doc));
       Y.applyUpdate(copy, update);
       next = Y.encodeStateAsUpdate(copy).length;
+      const pending = hasPending(copy);
       copy.destroy();
-      if (next > maxBytes()) throw new TooLarge();
+      if (next > maxBytes() || pending) throw new TooLarge();
     }
     Y.applyUpdate(doc, update, origin);
     room.size = next;
+    if (hasPending(doc)) {
+      // Defence in depth, should be unreachable: never keep pending state in the live doc.
+      doc.store.pendingStructs = null;
+      doc.store.pendingDs = null;
+      throw new TooLarge();
+    }
   }
 
   private openDoc(room: Room, state: Buffer | null): Y.Doc {

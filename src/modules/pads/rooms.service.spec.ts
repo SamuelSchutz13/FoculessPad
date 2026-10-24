@@ -277,10 +277,10 @@ describe('RoomsService', () => {
     }
   });
 
-  it('closes a socket sending more than 30 SYNC messages per second with 1008', async () => {
+  it('closes a socket sending more than 60 SYNC messages per second with 1008', async () => {
     const a = await join('fast', false, 0);
     const step1 = msg(MSG.SYNC, (e) => syncProtocol.writeSyncStep1(e, new Y.Doc()));
-    for (let i = 0; i < 30; i++) await recv(a, step1);
+    for (let i = 0; i < 60; i++) await recv(a, step1);
     expect(a.closeCode).toBeUndefined();
     await recv(a, step1);
     expect(a.closeCode).toBe(1008);
@@ -326,6 +326,114 @@ describe('RoomsService', () => {
       expect(s1.closeCode).toBe(CLOSE.TOO_LARGE);
       await recv(s2, kb);
       expect(s2.types()).toContain(MSG.COMPACT_REQ);
+    });
+  });
+
+  describe('updates with missing dependencies (reviewer pend.js)', () => {
+    const N = 2000;
+    const seed = async (name: string, doc: Y.Doc) =>
+      ds.getRepository(Pad).save({ name, state: Buffer.from(Y.encodeStateAsUpdate(doc)) });
+    const afterFlush = async (name: string, ...open: FakeSocket[]) => {
+      for (const s of open) if (s.readyState === 1) s.close(1000);
+      await drain();
+      const state = (await pads.findOrNull(name))!.state!;
+      expect(state.length).toBeLessThanOrEqual(maxPadBytes());
+      return textOf(state);
+    };
+
+    it('attack A: a delete set for clocks not yet sent is refused with 4413', async () => {
+      const server = new Y.Doc();
+      server.getText('t').insert(0, 'hello');
+      await seed('pa', server);
+      const a = new Y.Doc();
+      a.clientID = 2 ** 52 + 7;
+      Y.applyUpdate(a, Y.encodeStateAsUpdate(server));
+      const sv0 = Y.encodeStateVector(a);
+      a.getText('t').insert(5, 'q'.repeat(2 * N));
+      const uStruct = Y.encodeStateAsUpdate(a, sv0);
+      const sv1 = Y.encodeStateVector(a);
+      a.transact(() => {
+        for (let i = 0; i < N; i++) a.getText('t').delete(5 + i, 1);
+      });
+      const uDs = Y.diffUpdate(Y.encodeStateAsUpdate(a, sv0), sv1); // delete set only
+
+      const s1 = await join('pa', false, 0);
+      const s2 = await join('pa', false, 0);
+      await recv(s1, syncUpdate(uDs));
+      expect(s1.closeCode).toBe(CLOSE.TOO_LARGE);
+      expect(syncUpdatesSeen(s2)).toBe(0);
+      // The struct alone is harmless now: nothing pending to integrate with it.
+      await recv(s2, syncUpdate(uStruct));
+      expect(s2.closeCode).toBeUndefined();
+      expect(await afterFlush('pa', s2)).toBe('hello' + 'q'.repeat(2 * N));
+    });
+
+    it('attack B: inserts without their clock-0 struct are refused with 4413', async () => {
+      const server = new Y.Doc();
+      const base = new Y.Doc();
+      base.clientID = 2 ** 52 + 1;
+      base.getText('t').insert(0, 'w'.repeat(2 * N));
+      Y.applyUpdate(server, Y.encodeStateAsUpdate(base));
+      await seed('pb', server);
+      const z = new Y.Doc();
+      z.clientID = 2 ** 52 + 9;
+      Y.applyUpdate(z, Y.encodeStateAsUpdate(server));
+      const svServer = Y.encodeStateVector(z);
+      z.getText('t').insert(0, 'k'); // clock 0, withheld
+      const u0 = Y.encodeStateAsUpdate(z, svServer);
+      const sv1 = Y.encodeStateVector(z);
+      z.transact(() => {
+        for (let i = N - 1; i >= 0; i--) z.getText('t').insert(2 * i + 2, 'm');
+      });
+      const uRest = Y.encodeStateAsUpdate(z, sv1);
+
+      const s1 = await join('pb', false, 0);
+      const s2 = await join('pb', false, 0);
+      await recv(s1, syncUpdate(uRest));
+      expect(s1.closeCode).toBe(CLOSE.TOO_LARGE);
+      expect(syncUpdatesSeen(s2)).toBe(0);
+      await recv(s2, syncUpdate(u0)); // the small clock-0 update finds nothing pending
+      expect(s2.closeCode).toBeUndefined();
+      expect(await afterFlush('pb', s2)).toBe('k' + 'w'.repeat(2 * N));
+    });
+
+    it('normal concurrent edits from two synced clients are unaffected', async () => {
+      const s1 = await join('duo', false, 0);
+      const s2 = await join('duo', false, 0);
+      const d1 = new Y.Doc();
+      const d2 = new Y.Doc();
+      for (const [doc, sock] of [
+        [d1, s1],
+        [d2, s2],
+      ] as const) {
+        doc.on('update', (u: Uint8Array, origin: unknown) => {
+          if (origin !== 'server') void recv(sock, syncUpdate(u));
+        });
+      }
+      const relay = (from: FakeSocket, to: Y.Doc, seen: { n: number }) => {
+        for (const m of from.sent.slice(seen.n)) {
+          const d = decoding.createDecoder(m);
+          if (decoding.readVarUint(d) !== MSG.SYNC || decoding.readVarUint(d) !== 2) continue;
+          Y.applyUpdate(to, decoding.readVarUint8Array(d), 'server');
+        }
+        seen.n = from.sent.length;
+      };
+      const seen1 = { n: 0 };
+      const seen2 = { n: 0 };
+      for (let i = 0; i < 20; i++) {
+        d1.getText('t').insert(0, 'a'); // concurrent: neither has seen the other's edit yet
+        d2.getText('t').insert(d2.getText('t').length, 'b');
+        await drain();
+        relay(s1, d1, seen1);
+        relay(s2, d2, seen2);
+        d1.getText('t').delete(0, 1);
+        await drain();
+        relay(s1, d1, seen1);
+        relay(s2, d2, seen2);
+      }
+      expect([s1.closeCode, s2.closeCode]).toEqual([undefined, undefined]);
+      expect(d1.getText('t').toString()).toBe(d2.getText('t').toString());
+      expect(await afterFlush('duo', s1, s2)).toBe(d1.getText('t').toString());
     });
   });
 });
