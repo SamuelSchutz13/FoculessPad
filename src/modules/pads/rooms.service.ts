@@ -14,11 +14,25 @@ import { WriteLock } from './write-lock';
 
 const FLUSH_DEBOUNCE_MS = 2000;
 const COMPACT_AFTER = 200;
+/** Generous cap on the bytes one struct split adds to the encoded Doc (header + 2 IDs ≈ 40). */
+const SPLIT_BYTES = 64;
+// shortcut: per-socket fixed window in memory; move to a shared limiter with several instances.
+/** Open pads only: each SYNC message may cost an O(doc) exact size check. */
+const MAX_SYNC_MESSAGES_PER_SECOND = 30;
+
 /**
- * Upper bound of how much an update grows the encoded Doc: splitting existing structs can cost
- * more than the update itself (measured up to ~6.5x for a crafted delete-every-other-char).
+ * Upper bound of how much applying `update` grows Y.encodeStateAsUpdate(doc). The update's own
+ * structs and delete ranges are re-encoded at most at their size in the update; beyond that,
+ * each struct can split up to 2 existing structs (at origin and rightOrigin) and each delete
+ * range up to 2 (its two ends), and a split adds one struct of at most SPLIT_BYTES.
+ * (Y.mergeUpdates is not a bound: it never splits, so it undercounts exactly these cases.)
  */
-const growthBound = (update: Uint8Array) => update.length * 16 + 128;
+function growthBound(update: Uint8Array): number {
+  const { structs, ds } = Y.decodeUpdate(update);
+  let ranges = 0;
+  for (const list of ds.clients.values()) ranges += list.length;
+  return update.length + SPLIT_BYTES * (2 * (structs.length + ranges) + 1);
+}
 const maxBytes = () => env.maxPadSizeKb * 1024;
 
 interface Room {
@@ -57,6 +71,7 @@ export class RoomsService implements OnModuleDestroy {
   private readonly logger = new Logger(RoomsService.name);
   private readonly rooms = new Map<string, Room>();
   private readonly roomOf = new Map<WebSocket, Room>();
+  private readonly rate = new WeakMap<WebSocket, { start: number; count: number }>();
 
   constructor(
     @InjectDataSource() private readonly dataSource: DataSource,
@@ -131,6 +146,7 @@ export class RoomsService implements OnModuleDestroy {
       const type = decoding.readVarUint(d);
       if (type === MSG.SYNC && room.doc) {
         if (data.length > maxBytes()) throw new TooLarge();
+        if (!this.withinRate(socket)) return socket.close(1008);
         if (decoding.readVarUint(d) === syncProtocol.messageYjsSyncStep1) {
           const reply = encoding.createEncoder();
           encoding.writeVarUint(reply, MSG.SYNC);
@@ -149,6 +165,8 @@ export class RoomsService implements OnModuleDestroy {
         socket.close(1003);
       }
     } catch (err) {
+      // A refused reply to COMPACT_REQ must not leave the compaction waiting on this socket.
+      if (room.compactor === socket) room.compactor = undefined;
       if (err instanceof TooLarge) return socket.close(CLOSE.TOO_LARGE);
       this.logger.warn(`Dropping a client of "${room.name}": ${String(err)}`);
       socket.close(1003);
@@ -183,11 +201,18 @@ export class RoomsService implements OnModuleDestroy {
     for (const s of room.sockets) s.close(code);
   }
 
+  private withinRate(socket: WebSocket): boolean {
+    const now = Date.now();
+    let r = this.rate.get(socket);
+    if (!r || now - r.start >= 1000) this.rate.set(socket, (r = { start: now, count: 0 }));
+    return ++r.count <= MAX_SYNC_MESSAGES_PER_SECOND;
+  }
+
   /**
    * Applies an update only if the pad stays within maxPadSizeKb, so an over-limit edit is
    * never broadcast nor persisted. room.size is an upper bound (see growthBound), re-anchored to
-   * the exact size on every flush; only when the bound crosses the limit is the exact size
-   * measured, on a copy (O(doc), so not done for every keystroke).
+   * the exact size on every flush and exact check; when the bound crosses the limit the exact
+   * size is measured on a copy (O(doc)), so a full pad can still shrink through deletes.
    */
   private applyCapped(room: Room, update: Uint8Array, origin: WebSocket): void {
     const doc = room.doc!;
@@ -245,8 +270,7 @@ export class RoomsService implements OnModuleDestroy {
           .where('u.padName = :name', { name: room.name })
           .getRawOne<{ bytes: number }>();
         const bytes = (pad.snapshot?.length ?? 0) + Number(pending?.bytes ?? 0) + data.length;
-        // Snapshot + pending may reach 2x the limit: past 1x a compaction is requested, which
-        // shrinks it back; refusing at 1x would leave no room for that compaction to happen.
+        // 2x: content stays capped at 1x per snapshot/update; the slack lets the COMPACT_REQ sent past 1x land.
         if (bytes > 2 * maxBytes()) throw new TooLarge();
         await m.insert(PadUpdate, { padName: room.name, seq: pad.nextSeq, data });
         await m.update(Pad, { name: room.name }, { nextSeq: pad.nextSeq + 1 });

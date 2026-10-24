@@ -56,6 +56,7 @@ const textOf = (state: Buffer | null | undefined) => {
   if (state) Y.applyUpdate(doc, state);
   return doc.getText('t').toString();
 };
+const maxPadBytes = () => env.maxPadSizeKb * 1024;
 const keys = {
   salt: Buffer.alloc(16, 2),
   authKey: Buffer.alloc(32, 1),
@@ -222,6 +223,109 @@ describe('RoomsService', () => {
       await recv(s, kb(9));
       expect(s.closeCode).toBe(CLOSE.TOO_LARGE);
       expect(await seqs('pc')).toHaveLength(8);
+    });
+  });
+
+  /** Reviewer's g2 construction: K authors with 2^52 clientIDs, then delete every other char. */
+  const g2 = (authors: number) => {
+    const server = new Y.Doc();
+    for (let k = 0; k < authors; k++) {
+      const a = new Y.Doc();
+      a.clientID = 2 ** 52 + k;
+      Y.applyUpdate(a, Y.encodeStateAsUpdate(server));
+      a.getText('t').insert(0, 'z');
+      a.getText('t').insert(0, 'x'.repeat(126));
+      Y.applyUpdate(server, Y.encodeStateAsUpdate(a));
+    }
+    const state = Buffer.from(Y.encodeStateAsUpdate(server));
+    const atk = new Y.Doc();
+    Y.applyUpdate(atk, state);
+    const sv = Y.encodeStateVector(atk);
+    const len = atk.getText('t').length;
+    atk.transact(() => {
+      for (let i = 0; 2 * i + 1 < len; i++) atk.getText('t').delete(i + 1, 1);
+    });
+    return { state, attack: Y.encodeStateAsUpdate(atk, sv) };
+  };
+  const syncUpdate = (u: Uint8Array) => msg(MSG.SYNC, (e) => syncProtocol.writeUpdate(e, u));
+  const syncUpdatesSeen = (s: FakeSocket) =>
+    s.sent.filter((m) => {
+      const d = decoding.createDecoder(m);
+      return decoding.readVarUint(d) === MSG.SYNC && decoding.readVarUint(d) === 2;
+    }).length;
+
+  it('refuses the crafted g2 update (~19x growth) with 4413 and keeps the state', async () => {
+    const { state, attack } = g2(20); // 3.2 KB state; the attack would grow it to ~54.6 KB
+    const original = env.maxPadSizeKb;
+    env.maxPadSizeKb = 50;
+    try {
+      await ds.getRepository(Pad).save({ name: 'g2', state });
+      const a = await join('g2', false, 0);
+      const b = await join('g2', false, 0);
+      expect(attack.length).toBeLessThan(maxPadBytes());
+      await recv(a, syncUpdate(attack));
+      expect(a.closeCode).toBe(CLOSE.TOO_LARGE);
+      expect(syncUpdatesSeen(b)).toBe(0);
+
+      b.close(1000); // flush
+      await drain();
+      const saved = (await pads.findOrNull('g2'))!.state!;
+      expect(saved.length).toBeLessThanOrEqual(maxPadBytes());
+      expect(textOf(saved)).toBe(textOf(state));
+    } finally {
+      env.maxPadSizeKb = original;
+    }
+  });
+
+  it('closes a socket sending more than 30 SYNC messages per second with 1008', async () => {
+    const a = await join('fast', false, 0);
+    const step1 = msg(MSG.SYNC, (e) => syncProtocol.writeSyncStep1(e, new Y.Doc()));
+    for (let i = 0; i < 30; i++) await recv(a, step1);
+    expect(a.closeCode).toBeUndefined();
+    await recv(a, step1);
+    expect(a.closeCode).toBe(1008);
+  });
+
+  describe('with a 4 KB pad limit (cap edge cases)', () => {
+    const original = env.maxPadSizeKb;
+    beforeEach(() => (env.maxPadSizeKb = 4));
+    afterEach(() => (env.maxPadSizeKb = original));
+
+    it('a pad at the cap can still shrink through deletes', async () => {
+      const full = new Y.Doc();
+      full.getText('t').insert(0, 'w'.repeat(4000));
+      const state = Buffer.from(Y.encodeStateAsUpdate(full));
+      expect(state.length).toBeGreaterThan(4000);
+      expect(state.length).toBeLessThanOrEqual(4096);
+      await ds.getRepository(Pad).save({ name: 'full', state });
+
+      const a = await join('full', false, 0);
+      const b = await join('full', false, 0);
+      const sv = Y.encodeStateVector(full);
+      full.getText('t').delete(0, 1000);
+      await recv(a, syncUpdate(Y.encodeStateAsUpdate(full, sv)));
+      expect(a.closeCode).toBeUndefined();
+      expect(syncUpdatesSeen(b)).toBe(1);
+
+      b.close(1000);
+      a.close(1000);
+      await drain();
+      expect(textOf((await pads.findOrNull('full'))?.state)).toHaveLength(3000);
+    });
+
+    it('a refused ENC_SNAPSHOT frees the compaction for another socket', async () => {
+      await pads.setPassword('cs', keys);
+      const s1 = await join('cs', true, 1);
+      const s2 = await join('cs', true, 1);
+      s1.close = (code: number) => void (s1.closeCode = code); // ws emits 'close' only later
+      const kb = msg(MSG.ENC_UPDATE, (e) => encoding.writeVarUint8Array(e, Buffer.alloc(1000)));
+      for (let i = 0; i < 5; i++) await recv(s1, kb); // > 4 KB pending -> COMPACT_REQ to s1
+      expect(s1.types()).toContain(MSG.COMPACT_REQ);
+
+      await recv(s1, encSnapshot(5, 'x'.repeat(5000))); // over 1x: refused
+      expect(s1.closeCode).toBe(CLOSE.TOO_LARGE);
+      await recv(s2, kb);
+      expect(s2.types()).toContain(MSG.COMPACT_REQ);
     });
   });
 });
