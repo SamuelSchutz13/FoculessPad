@@ -35,4 +35,10 @@ describe('crypto', () => {
     expect(toB64url(u8)).not.toMatch(/[+/=]/)
     expect(fromB64url(toB64url(u8))).toEqual(u8)
   })
+
+  it('round-trips a 600 KB payload', () => {
+    const u8 = new Uint8Array(600 * 1024)
+    for (let i = 0; i < u8.length; i += 65536) crypto.getRandomValues(u8.subarray(i, i + 65536))
+    expect(fromB64url(toB64url(u8))).toEqual(u8)
+  })
 })

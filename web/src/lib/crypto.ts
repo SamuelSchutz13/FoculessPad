@@ -8,7 +8,12 @@ export function randomSalt(): Uint8Array {
 }
 
 export function toB64url(u8: Uint8Array): string {
-  return btoa(String.fromCharCode(...u8)).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '')
+  // Chunked: spreading a large array into fromCharCode overflows the call stack.
+  let bin = ''
+  for (let i = 0; i < u8.length; i += 0x8000) {
+    bin += String.fromCharCode.apply(null, u8.subarray(i, i + 0x8000) as unknown as number[])
+  }
+  return btoa(bin).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '')
 }
 
 export function fromB64url(s: string): Uint8Array {
