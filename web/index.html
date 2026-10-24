@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="pt-BR">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    
+    <!-- Browser UI color: the pastel cream / deep indigo theme backgrounds. -->
+    <meta name="theme-color" content="#fefaf1" media="(prefers-color-scheme: light)" />
+    <meta name="theme-color" content="#181825" media="(prefers-color-scheme: dark)" />
+    <meta name="description" content="Bloco de notas em tempo real, com senha opcional e criptografia de ponta a ponta." />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>FoculessPad</title>
+    <script>
+      // Apply the theme before the first paint (same key as useDark in src/lib/theme.ts),
+      // otherwise dark-mode users see a white flash while the app loads.
+      try {
+        const saved = localStorage.getItem('vueuse-color-scheme')
+        const systemDark = matchMedia('(prefers-color-scheme: dark)').matches
+        if (saved === 'dark' || ((!saved || saved === 'auto') && systemDark)) {
+          document.documentElement.classList.add('dark')
+        }
+      } catch {}
+    </script>
+  </head>
+  <body>
+    <div id="app"></div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
