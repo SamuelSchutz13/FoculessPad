@@ -15,8 +15,6 @@ export default {
   },
   home: {
     title: 'Suas notas, com privacidade',
-    description:
-      'Escolha um nome e comece a escrever. Com senha, a nota é cifrada no seu navegador e nem o servidor consegue ler.',
     noSignup: 'Sem cadastro',
     noTelemetry: 'Sem telemetria',
     endToEnd: 'Criptografia de ponta a ponta',

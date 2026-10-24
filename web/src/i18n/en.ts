@@ -18,8 +18,6 @@ const en: typeof ptBR = {
   },
   home: {
     title: 'Your notes, private',
-    description:
-      'Pick a name and start writing. With a password, the note is encrypted in your browser and not even the server can read it.',
     noSignup: 'No sign-up',
     noTelemetry: 'No telemetry',
     endToEnd: 'End-to-end encryption',

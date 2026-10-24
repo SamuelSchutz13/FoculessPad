@@ -11,8 +11,7 @@ import { isDark } from '@/lib/theme'
 const { t } = useI18n()
 
 // Tab title follows the language.
-useTitle(computed(() => `${t('app.homeTitle')} — FoculessPad`))
-</script>
+useTitle(computed(() => `${t('app.homeTitle')} — FoculessPad`))</script>
 
 <template>
   <div class="flex min-h-svh flex-col bg-background text-foreground">

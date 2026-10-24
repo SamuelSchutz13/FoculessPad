@@ -32,7 +32,6 @@ function open() {
   <section class="mx-auto grid max-w-md gap-6 py-12">
     <div class="grid gap-2 text-center">
       <h1 class="text-3xl font-bold">{{ t('home.title') }}</h1>
-      <p class="text-muted-foreground">{{ t('home.description') }}</p>
       <ul class="mt-2 flex flex-wrap justify-center gap-2">
         <li
           v-for="promise in promises"
