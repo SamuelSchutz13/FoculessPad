@@ -16,17 +16,12 @@ import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { errorMessage, removePassword, setPassword } from '@/lib/api'
 import { deriveKeys, encrypt, randomSalt, toB64url } from '@/lib/crypto'
+import type { Resume } from '@/lib/relock'
 import { nextPaint } from '@/lib/utils'
-
-/** What the next PadProvider needs: empty for an open pad. */
-export interface Creds {
-  token?: string
-  encKey?: CryptoKey
-}
 
 const props = defineProps<{ name: string; protected: boolean; token?: string; doc: Y.Doc }>()
 /** Emitted as the request starts: the server closes our socket (4409) before it answers. */
-const emit = defineEmits<{ change: [creds: Promise<Creds>] }>()
+const emit = defineEmits<{ change: [next: Promise<Resume>] }>()
 const open = defineModel<boolean>('open', { required: true })
 const { t } = useI18n()
 
@@ -47,13 +42,13 @@ watch(open, () => {
   tried.value = false
 })
 
-async function run(work: () => Promise<Creds>, done: string) {
+async function run(work: () => Promise<Resume>, done: string) {
   busy.value = true
   try {
     await nextPaint() // Argon2 blocks the main thread for ~1 s
-    const creds = work()
-    emit('change', creds)
-    await creds
+    const next = work()
+    emit('change', next)
+    await next
     open.value = false
     toast.success(done)
   } catch (error) {
@@ -76,7 +71,8 @@ function submitPassword() {
         { salt: toB64url(salt), authKey: toB64url(authKey), snapshot: toB64url(snapshot) },
         props.token,
       )
-      return { token: session.token, encKey }
+      const info = { name: props.name, protected: true, salt: toB64url(salt) }
+      return { info, creds: { token: session.token, encKey, authKey } }
     },
     props.protected ? t('password.changeDone') : t('password.setDone'),
   )
@@ -87,7 +83,7 @@ function remove() {
   void run(async () => {
     // Sent in the clear on purpose: without a password the server keeps readable state.
     await removePassword(props.name, toB64url(Y.encodeStateAsUpdate(props.doc)), props.token)
-    return {}
+    return { info: { name: props.name, protected: false, salt: null }, creds: {} }
   }, t('password.removeDone'))
 }
 </script>

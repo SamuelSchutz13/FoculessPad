@@ -6,12 +6,13 @@ import { useRouter } from 'vue-router'
 import { toast } from 'vue-sonner'
 import * as Y from 'yjs'
 import PadEditor from '@/components/PadEditor.vue'
-import PasswordDialog, { type Creds } from '@/components/PasswordDialog.vue'
+import PasswordDialog from '@/components/PasswordDialog.vue'
 import UnlockForm from '@/components/UnlockForm.vue'
 import { Button } from '@/components/ui/button'
 import { errorMessage, getPad, type PadInfo, WS_URL } from '@/lib/api'
 import { PadProvider, type PadStatus } from '@/lib/pad-provider'
 import { CLOSE } from '@/lib/protocol'
+import { afterLock, type Creds, type Resume } from '@/lib/relock'
 
 const props = defineProps<{ name: string }>()
 const { t } = useI18n()
@@ -26,13 +27,14 @@ const doc = shallowRef<Y.Doc | null>(null)
 const creds = shallowRef<Creds>({})
 const dialogOpen = ref(false)
 let provider: PadProvider | null = null
-/** A password change of ours is in flight; its 4409 must not show the lock screen. */
-let changing: Promise<Creds> | null = null
+/** Our own password change, set until the 4409 it causes is handled (see afterLock). */
+let changing: Promise<Resume> | null = null
 /** Bumped on every (re)load, so answers for a previous pad are ignored. */
 let generation = 0
 
 function teardown() {
   generation++
+  changing = null
   provider?.destroy()
   provider = null
   doc.value = null
@@ -59,6 +61,7 @@ async function load() {
   }
 }
 
+/** Reconnects on the current Y.Doc (created if none), so edits not yet sent survive. */
 function start(next: Creds) {
   provider?.destroy()
   creds.value = next
@@ -70,32 +73,37 @@ function start(next: Creds) {
   p.onStatus((s, code) => {
     if (provider !== p) return
     status.value = s
-    if (s === 'locked' && !changing) void relock()
+    if (s === 'locked') void onLocked()
     else if (code === CLOSE.TOO_LARGE || code === 1009) toast.error(t('pad.tooLarge'))
     else if (s === 'error') toast.error(t('pad.connectionError'))
   })
 }
 
-/** Someone else changed the password (or our token expired): ask for it again. */
-async function relock() {
-  await load()
-  if (info.value?.protected) toast.info(t('pad.locked'))
+async function onLocked() {
+  const mine = generation
+  const change = changing
+  changing = null
+  try {
+    const next = await afterLock(info.value!, creds.value, change)
+    if (mine !== generation) return
+    info.value = next.info
+    if (next.creds) return start(next.creds)
+    // Someone else changed the password: this tab may no longer read the pad.
+    provider = null
+    doc.value = null
+    people.value = 0
+    dialogOpen.value = false
+    toast.info(t('pad.locked'))
+  } catch (error) {
+    if (mine !== generation) return
+    loadFailed.value = true
+    toast.error(errorMessage(error))
+  }
 }
 
-async function onPasswordChange(pending: Promise<Creds>) {
+function onPasswordChange(pending: Promise<Resume>) {
   changing = pending
-  const mine = generation
-  try {
-    const next = await pending
-    if (mine !== generation) return
-    info.value = { ...info.value!, protected: next.encKey !== undefined }
-    start(next) // same Y.Doc, new token and key
-  } catch {
-    // The dialog shows the error; if the socket was locked meanwhile, it was someone else.
-    if (mine === generation && status.value === 'locked') void relock()
-  } finally {
-    changing = null
-  }
+  pending.catch(() => undefined) // the dialog shows the error
 }
 
 watch(() => props.name, load, { immediate: true })

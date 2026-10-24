@@ -136,7 +136,7 @@ export class PadProvider {
     }
   }
 
-  private halt(s: PadStatus, code: number) {
+  private halt(s: PadStatus, code?: number) {
     this.stop()
     this.setStatus(s, code)
   }
@@ -148,6 +148,11 @@ export class PadProvider {
     if (type === MSG.PRESENCE) {
       const n = decoding.readVarUint(d)
       for (const cb of this.presenceCbs) cb(n)
+    } else if ((type === MSG.SYNC && encKey) || (type === MSG.ENC_INIT && !encKey)) {
+      // The pad switched mode while we were away (e.g. password removed, and the open room
+      // let us in): stop as `locked` so the view refetches and reconnects in the right mode.
+      this.halt('locked')
+      ws.close()
     } else if (type === MSG.SYNC && !encKey) {
       const reply = encoding.createEncoder()
       encoding.writeVarUint(reply, MSG.SYNC)

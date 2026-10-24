@@ -221,3 +221,84 @@ describe('PadProvider, close codes', () => {
     expect(FakeWebSocket.instances).toHaveLength(3)
   })
 })
+
+const encInit = (parts: Uint8Array[]) =>
+  frame(MSG.ENC_INIT, (e) => {
+    encoding.writeVarUint8Array(e, new Uint8Array())
+    encoding.writeVarUint(e, parts.length)
+    for (const p of parts) encoding.writeVarUint8Array(e, p)
+  })
+
+describe('PadProvider, failure paths', () => {
+  it('an encrypted provider that gets SYNC (password removed meanwhile) → locked', async () => {
+    const { ws, statuses } = connect({ token: 't', encKey: await newKey() })
+    ws.receive(frame(MSG.SYNC, (e) => syncProtocol.writeSyncStep1(e, new Y.Doc())))
+    await vi.waitFor(() => expect(statuses.at(-1)).toBe('locked'))
+    expect(ws.readyState).toBe(3)
+  })
+
+  it('an open provider that gets ENC_INIT (password set meanwhile) → locked', async () => {
+    const { ws, statuses } = connect()
+    ws.receive(encInit([]))
+    await vi.waitFor(() => expect(statuses.at(-1)).toBe('locked'))
+  })
+
+  it('a tampered ENC_INIT → error, without throwing', async () => {
+    const key = await newKey()
+    const bad = await encrypt(key, Y.encodeStateAsUpdate(textDoc('x')), NAME)
+    bad[bad.length - 1]! ^= 1
+    const { doc, ws, statuses } = connect({ token: 't', encKey: key })
+    ws.receive(encInit([bad]))
+    await vi.waitFor(() => expect(statuses.at(-1)).toBe('error'))
+    expect(doc.getText('content').toString()).toBe('')
+    expect(ws.sent).toHaveLength(0)
+  })
+
+  it('after destroy(), COMPACT_REQ and local edits send nothing', async () => {
+    const key = await newKey()
+    const { doc, ws, statuses } = connect({ token: 't', encKey: key })
+    ws.receive(encInit([]))
+    await vi.waitFor(() => expect(statuses).toContain('synced'))
+    provider!.destroy()
+    ws.readyState = 1 // even if the socket were still open
+    ws.receive(frame(MSG.COMPACT_REQ, (e) => encoding.writeVarUint(e, 1)))
+    doc.getText('content').insert(0, 'late')
+    await sleep(150)
+    expect(ws.sent).toHaveLength(0)
+  })
+
+  it('a new provider on the same doc resends edits the old one never sent', async () => {
+    const key = await newKey()
+    const first = connect({ token: 'old', encKey: key })
+    first.ws.receive(encInit([]))
+    await vi.waitFor(() => expect(first.statuses).toContain('synced'))
+    first.ws.serverClose(4401) // token expired
+    first.doc.getText('content').insert(0, 'typed while locked')
+    provider!.destroy()
+
+    provider = new PadProvider({ url: 'ws://test/ws', name: NAME, doc: first.doc, token: 'new', encKey: key })
+    const ws = FakeWebSocket.instances.at(-1)!
+    ws.open()
+    ws.receive(encInit([]))
+    await vi.waitFor(() => expect(ws.sent).toHaveLength(1))
+    const d = decoding.createDecoder(ws.sent[0]!)
+    expect(decoding.readVarUint(d)).toBe(MSG.ENC_UPDATE)
+    const copy = new Y.Doc()
+    Y.applyUpdate(copy, await decrypt(key, decoding.readVarUint8Array(d), NAME))
+    expect(copy.getText('content').toString()).toBe('typed while locked')
+  })
+
+  it('reconnect backoff doubles and caps at 10 s', () => {
+    vi.useFakeTimers()
+    connect()
+    const delays = [500, 1000, 2000, 4000, 8000, 10_000, 10_000]
+    for (const delay of delays) {
+      const count = FakeWebSocket.instances.length
+      FakeWebSocket.instances.at(-1)!.serverClose(1006)
+      vi.advanceTimersByTime(delay - 1)
+      expect(FakeWebSocket.instances).toHaveLength(count)
+      vi.advanceTimersByTime(1)
+      expect(FakeWebSocket.instances).toHaveLength(count + 1)
+    }
+  })
+})

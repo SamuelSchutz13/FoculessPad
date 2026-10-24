@@ -8,10 +8,11 @@ import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { errorMessage, errorStatus, unlock } from '@/lib/api'
 import { deriveKeys, fromB64url, toB64url } from '@/lib/crypto'
+import type { Creds } from '@/lib/relock'
 import { nextPaint } from '@/lib/utils'
 
 const props = defineProps<{ name: string; salt: string }>()
-const emit = defineEmits<{ unlocked: [creds: { token: string; encKey: CryptoKey }] }>()
+const emit = defineEmits<{ unlocked: [creds: Creds] }>()
 const { t } = useI18n()
 
 const password = ref('')
@@ -24,7 +25,7 @@ async function submit() {
     await nextPaint() // Argon2 blocks the main thread for ~1 s
     const { authKey, encKey } = await deriveKeys(password.value, fromB64url(props.salt))
     const { token } = await unlock(props.name, toB64url(authKey))
-    emit('unlocked', { token, encKey })
+    emit('unlocked', { token, encKey, authKey })
   } catch (error) {
     const status = errorStatus(error)
     toast.error(
