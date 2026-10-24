@@ -42,6 +42,10 @@ const maxBytes = () => env.maxPadSizeKb * 1024;
  */
 function hasMissingDeps(doc: Y.Doc, update: Uint8Array): boolean {
   const { structs, ds } = Y.decodeUpdate(update);
+  // Yjs keys client blocks by client, so a repeated client drops all but its last block (a gap
+  // decodeUpdate hides). Valid encoders write one block per client.
+  const blocks = decoding.readVarUint(decoding.createDecoder(update));
+  if (blocks !== new Set(structs.map((st) => st.id.client)).size) return true;
   const reach = Y.decodeStateVector(Y.encodeStateVector(doc));
   const has = (id: Y.ID | null) => !id || id.clock < (reach.get(id.client) ?? 0);
   for (const st of structs) {
@@ -141,7 +145,15 @@ export class RoomsService implements OnModuleDestroy {
       }
       if (!room) {
         room = { name, keyVersion, sockets: new Set(), size: 0 };
-        if (!protectedPad) room.doc = this.openDoc(room, pad?.state ?? null);
+        if (!protectedPad) {
+          try {
+            room.doc = this.openDoc(room, pad?.state ?? null);
+          } catch (err) {
+            // Left as stored (never overwritten): it may still be recoverable by hand.
+            this.logger.error(`Stored state of "${name}" is not a valid Yjs update`, String(err));
+            return socket.close(1011);
+          }
+        }
         this.rooms.set(name, room);
       }
       room.sockets.add(socket);
@@ -258,7 +270,8 @@ export class RoomsService implements OnModuleDestroy {
     Y.applyUpdate(doc, update, origin);
     room.size = next;
     if (hasPending(doc)) {
-      // Defence in depth, should be unreachable: never keep pending state in the live doc.
+      // A real backstop: hasMissingDeps is a pre-check on the decoded update, and crafted
+      // encodings it does not model could still leave pending state. Never keep it in the doc.
       doc.store.pendingStructs = null;
       doc.store.pendingDs = null;
       throw new TooLarge();

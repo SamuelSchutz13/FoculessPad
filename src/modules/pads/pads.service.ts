@@ -10,6 +10,7 @@ import {
 } from '@nestjs/common';
 import { InjectDataSource } from '@nestjs/typeorm';
 import { DataSource, EntityManager } from 'typeorm';
+import * as Y from 'yjs';
 import { env } from '../../config/env';
 import { PadUpdate } from './pad-update.entity';
 import { Pad } from './pad.entity';
@@ -21,6 +22,20 @@ const sha256 = (b: Buffer) => createHash('sha256').update(b).digest();
 
 function assertSize(data: Buffer): void {
   if (data.length > env.maxPadSizeKb * 1024) throw new PayloadTooLargeException();
+}
+
+/** Stored as the open state, so every join applies it: garbage there would brick the pad. */
+function assertYjsState(state: Buffer): void {
+  const doc = new Y.Doc();
+  try {
+    Y.applyUpdate(doc, state);
+    if (doc.store.pendingStructs === null && doc.store.pendingDs === null) return;
+  } catch {
+    // falls through to the 400
+  } finally {
+    doc.destroy();
+  }
+  throw new BadRequestException('state is not a complete Yjs update');
 }
 
 @Injectable()
@@ -74,6 +89,8 @@ export class PadsService {
     token?: string,
   ) {
     assertSize(snapshot);
+    // Ciphertext, so only its presence can be checked here.
+    if (!snapshot.length) throw new BadRequestException('snapshot is empty');
     const keyVersion = await this.writeTx(async (m) => {
       const pad = await m.findOneBy(Pad, { name });
       if (pad?.verifier && !this.tokens.verify(token, name, pad.keyVersion)) {
@@ -98,6 +115,7 @@ export class PadsService {
 
   async removePassword(name: string, token: string | undefined, state: Buffer): Promise<void> {
     assertSize(state);
+    assertYjsState(state);
     await this.writeTx(async (m) => {
       const pad = await m.findOneBy(Pad, { name });
       if (!pad?.verifier || !this.tokens.verify(token, name, pad.keyVersion)) {

@@ -76,7 +76,7 @@ Toda variável tem um padrão, exceto `APP_SECRET` em produção. Para mudar alg
 
 Um valor inválido (ex.: `PORT=abc`) impede a API de iniciar, com uma mensagem dizendo qual variável. Sem `APP_SECRET` em desenvolvimento, a API gera uma aleatória e avisa no log; as sessões desbloqueadas zeram a cada reinício.
 
-**Limites.** O conteúdo de cada nota é limitado a `MAX_PAD_SIZE_KB`. Em notas protegidas o servidor pode guardar até o dobro (o snapshot cifrado mais as edições cifradas esperando compactação). Uma conexão que manda mais de 60 mensagens de sincronização por segundo é fechada; o site agrupa a digitação a cada ~50 ms, então o uso normal fica bem abaixo disso.
+**Limites.** O conteúdo de cada nota é limitado a `MAX_PAD_SIZE_KB`. Em notas protegidas o servidor pode guardar até o dobro (o snapshot cifrado mais as edições cifradas esperando compactação). Uma conexão a uma nota aberta (sem senha) que manda mais de 60 mensagens de sincronização por segundo é fechada; o site agrupa a digitação a cada ~50 ms, então o uso normal fica bem abaixo disso.
 
 ### Scripts
 

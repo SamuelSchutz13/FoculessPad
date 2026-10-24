@@ -63,7 +63,7 @@ export class AllExceptionsFilter implements ExceptionFilter {
     if (body.statusCode >= 500) {
       this.logger.error(exception instanceof Error ? exception.stack : exception);
     }
-    // A failure mid-download can't be turned into JSON anymore.
+    // Once headers are out (a response already streaming), the error can no longer be sent as JSON.
     if (response.headersSent) return;
 
     response.status(body.statusCode).json(body);

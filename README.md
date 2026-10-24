@@ -76,7 +76,7 @@ Every variable has a default, except `APP_SECRET` in production. To change one, 
 
 An invalid value (e.g. `PORT=abc`) stops the API from starting, with a message naming the variable. Without `APP_SECRET` in development the API generates a random one and logs a warning; unlock sessions then reset on every restart.
 
-**Limits.** Each note's content is capped at `MAX_PAD_SIZE_KB`. For protected notes the server may store up to twice that (the encrypted snapshot plus encrypted edits waiting to be compacted). A connection that sends more than 60 sync messages per second is closed; the website batches typing every ~50 ms, so normal use stays far below that.
+**Limits.** Each note's content is capped at `MAX_PAD_SIZE_KB`. For protected notes the server may store up to twice that (the encrypted snapshot plus encrypted edits waiting to be compacted). A connection to an open note (no password) that sends more than 60 sync messages per second is closed; the website batches typing every ~50 ms, so normal use stays far below that.
 
 ### Scripts
 

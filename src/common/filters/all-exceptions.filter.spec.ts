@@ -9,16 +9,16 @@ import { toErrorBody } from './all-exceptions.filter';
 
 describe('toErrorBody', () => {
   it('wraps a single message in an array', () => {
-    expect(toErrorBody(new UnprocessableEntityException('File 2 is not a valid PDF'))).toEqual({
+    expect(toErrorBody(new UnprocessableEntityException('Note is too large'))).toEqual({
       statusCode: 422,
       error: 'Unprocessable Entity',
-      message: ['File 2 is not a valid PDF'],
+      message: ['Note is too large'],
     });
   });
 
   it('keeps validation message lists as they are', () => {
-    const exception = new BadRequestException(['ranges is invalid', 'angle is invalid']);
-    expect(toErrorBody(exception).message).toEqual(['ranges is invalid', 'angle is invalid']);
+    const exception = new BadRequestException(['salt is invalid', 'authKey is invalid']);
+    expect(toErrorBody(exception).message).toEqual(['salt is invalid', 'authKey is invalid']);
   });
 
   it('handles exceptions created with a plain string body', () => {
