@@ -1,0 +1,2 @@
+# Keep LF everywhere so Prettier formatting matches on Windows checkouts (core.autocrlf=true).
+* text=auto eol=lf
