@@ -4,6 +4,7 @@ import { ThrottlerGuard, ThrottlerModule } from '@nestjs/throttler';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { env } from './config/env';
 import { HealthModule } from './modules/health/health.module';
+import { PadsModule } from './modules/pads/pads.module';
 
 @Module({
   imports: [
@@ -22,6 +23,7 @@ import { HealthModule } from './modules/health/health.module';
       synchronize: true,
     }),
     HealthModule,
+    PadsModule,
   ],
   providers: [{ provide: APP_GUARD, useClass: ThrottlerGuard }],
 })
