@@ -1,8 +1,6 @@
 export default {
   app: {
-    noSignup: 'Sem cadastro',
-    noTelemetry: 'Sem telemetria',
-    endToEnd: 'Criptografia de ponta a ponta',
+    footer: 'Notas em tempo real. Com senha, o servidor só guarda conteúdo cifrado.',
     homeTitle: 'Bloco de notas',
     github: 'Código-fonte no GitHub',
   },
@@ -17,8 +15,9 @@ export default {
   },
   home: {
     title: 'Suas notas, com privacidade',
-    description:
-      'Escolha um nome e comece a escrever. Com senha, a nota é cifrada no seu navegador e nem o servidor consegue ler.',
+    noSignup: 'Sem cadastro',
+    noTelemetry: 'Sem telemetria',
+    endToEnd: 'Criptografia de ponta a ponta',
     label: 'Nome da nota',
     placeholder: 'faculdade/calculo',
     open: 'Abrir',

@@ -3,9 +3,7 @@ import type ptBR from './pt-BR'
 // Typed against the Portuguese messages so a missing or misspelled key fails the type-check.
 const en: typeof ptBR = {
   app: {
-    noSignup: 'No sign-up',
-    noTelemetry: 'No telemetry',
-    endToEnd: 'End-to-end encryption',
+    footer: 'Real-time notes. With a password, the server only stores encrypted content.',
     homeTitle: 'Notepad',
     github: 'Source code on GitHub',
   },
@@ -20,8 +18,9 @@ const en: typeof ptBR = {
   },
   home: {
     title: 'Your notes, private',
-    description:
-      'Pick a name and start writing. With a password, the note is encrypted in your browser and not even the server can read it.',
+    noSignup: 'No sign-up',
+    noTelemetry: 'No telemetry',
+    endToEnd: 'End-to-end encryption',
     label: 'Note name',
     placeholder: 'college/calculus',
     open: 'Open',
