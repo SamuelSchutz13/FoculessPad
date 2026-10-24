@@ -40,4 +40,21 @@ describe('toErrorBody', () => {
       message: ['Internal server error'],
     });
   });
+
+  it('keeps the 4xx status of body-parser errors', () => {
+    const err = Object.assign(new Error('request entity too large'), {
+      status: 413,
+      statusCode: 413,
+      type: 'entity.too.large',
+    });
+    expect(toErrorBody(err)).toEqual({
+      statusCode: 413,
+      error: 'Payload Too Large',
+      message: ['Payload Too Large'],
+    });
+  });
+
+  it('still hides non-HttpException 5xx errors', () => {
+    expect(toErrorBody(Object.assign(new Error('db down'), { status: 503 })).statusCode).toBe(500);
+  });
 });

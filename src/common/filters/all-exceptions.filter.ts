@@ -17,6 +17,18 @@ export interface ErrorBody {
 }
 
 export function toErrorBody(exception: unknown): ErrorBody {
+  // Express middleware (body-parser: 413 entity.too.large, 400 bad JSON) throws plain
+  // errors carrying a status; its 4xx are the client's fault and safe to report.
+  const status = (exception as { status?: unknown } | null)?.status;
+  if (
+    !(exception instanceof HttpException) &&
+    typeof status === 'number' &&
+    status >= 400 &&
+    status < 500
+  ) {
+    const error = STATUS_CODES[status] ?? 'Error';
+    return { statusCode: status, error, message: [error] };
+  }
   if (!(exception instanceof HttpException)) {
     // Unknown errors may carry internals (paths, stack), so they never reach the client.
     return {

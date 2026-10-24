@@ -4,16 +4,18 @@ import {
   HttpException,
   HttpStatus,
   Injectable,
+  Logger,
   PayloadTooLargeException,
   UnauthorizedException,
 } from '@nestjs/common';
 import { InjectDataSource } from '@nestjs/typeorm';
-import { DataSource } from 'typeorm';
+import { DataSource, EntityManager } from 'typeorm';
 import { env } from '../../config/env';
 import { PadUpdate } from './pad-update.entity';
 import { Pad } from './pad.entity';
 import { SessionTokenService } from './session-token.service';
 import { UnlockLockout } from './unlock-lockout';
+import { WriteLock } from './write-lock';
 
 const sha256 = (b: Buffer) => createHash('sha256').update(b).digest();
 
@@ -25,11 +27,13 @@ function assertSize(data: Buffer): void {
 export class PadsService {
   /** Set by the WebSocket gateway; called after setPassword/removePassword commit. */
   onKeyChange: (name: string) => void = () => undefined;
+  private readonly logger = new Logger(PadsService.name);
 
   constructor(
     @InjectDataSource() private readonly dataSource: DataSource,
     private readonly tokens: SessionTokenService,
     private readonly lockout: UnlockLockout,
+    private readonly lock: WriteLock,
   ) {}
 
   findOrNull(name: string): Promise<Pad | null> {
@@ -70,7 +74,7 @@ export class PadsService {
     token?: string,
   ) {
     assertSize(snapshot);
-    const keyVersion = await this.dataSource.transaction(async (m) => {
+    const keyVersion = await this.writeTx(async (m) => {
       const pad = await m.findOneBy(Pad, { name });
       if (pad?.verifier && !this.tokens.verify(token, name, pad.keyVersion)) {
         throw new UnauthorizedException('Invalid or missing token');
@@ -88,13 +92,13 @@ export class PadsService {
       await m.delete(PadUpdate, { padName: name });
       return next;
     });
-    this.onKeyChange(name);
+    this.notifyKeyChange(name);
     return this.tokens.sign(name, keyVersion);
   }
 
   async removePassword(name: string, token: string | undefined, state: Buffer): Promise<void> {
     assertSize(state);
-    await this.dataSource.transaction(async (m) => {
+    await this.writeTx(async (m) => {
       const pad = await m.findOneBy(Pad, { name });
       if (!pad?.verifier || !this.tokens.verify(token, name, pad.keyVersion)) {
         throw new UnauthorizedException('Invalid or missing token');
@@ -110,6 +114,19 @@ export class PadsService {
       });
       await m.delete(PadUpdate, { padName: name });
     });
-    this.onKeyChange(name);
+    this.notifyKeyChange(name);
+  }
+
+  private writeTx<T>(fn: (m: EntityManager) => Promise<T>): Promise<T> {
+    return this.lock.run(() => this.dataSource.transaction(fn));
+  }
+
+  /** The change is already committed: a failing hook must not turn it into a 500. */
+  private notifyKeyChange(name: string): void {
+    try {
+      this.onKeyChange(name);
+    } catch (err) {
+      this.logger.error(`onKeyChange failed for "${name}"`, err instanceof Error ? err.stack : err);
+    }
   }
 }

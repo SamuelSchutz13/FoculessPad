@@ -1,0 +1,251 @@
+import { Injectable, Logger, type OnModuleDestroy } from '@nestjs/common';
+import { InjectDataSource } from '@nestjs/typeorm';
+import * as decoding from 'lib0/decoding';
+import * as encoding from 'lib0/encoding';
+import { DataSource, LessThanOrEqual } from 'typeorm';
+import { WebSocket } from 'ws';
+import * as syncProtocol from 'y-protocols/sync';
+import * as Y from 'yjs';
+import { env } from '../../config/env';
+import { PadUpdate } from './pad-update.entity';
+import { Pad } from './pad.entity';
+import { CLOSE, MSG } from './protocol';
+import { WriteLock } from './write-lock';
+
+const FLUSH_DEBOUNCE_MS = 2000;
+const COMPACT_AFTER = 200;
+const maxBytes = () => env.maxPadSizeKb * 1024;
+
+interface Room {
+  name: string;
+  keyVersion: number;
+  sockets: Set<WebSocket>;
+  /** Open pads only: the readable document, held while someone is connected. */
+  doc?: Y.Doc;
+  timer?: NodeJS.Timeout;
+  /** Set by closeAll: the Doc must never be written again. */
+  dead?: boolean;
+  /** Protected pads: a COMPACT_REQ is outstanding with this socket. */
+  compactor?: WebSocket;
+}
+
+class TooLarge extends Error {}
+
+const frame = (type: number, write: (e: encoding.Encoder) => void) => {
+  const e = encoding.createEncoder();
+  encoding.writeVarUint(e, type);
+  write(e);
+  return encoding.toUint8Array(e);
+};
+
+const readData = (d: decoding.Decoder) => {
+  const data = decoding.readVarUint8Array(d);
+  if (data.length > maxBytes()) throw new TooLarge();
+  return Buffer.from(data);
+};
+
+// shortcut: rooms em memória, uma instância só; trocar por Redis pub/sub ao escalar.
+@Injectable()
+export class RoomsService implements OnModuleDestroy {
+  private readonly logger = new Logger(RoomsService.name);
+  private readonly rooms = new Map<string, Room>();
+  private readonly roomOf = new Map<WebSocket, Room>();
+
+  constructor(
+    @InjectDataSource() private readonly dataSource: DataSource,
+    private readonly lock: WriteLock,
+  ) {}
+
+  presence(name: string): number {
+    return this.rooms.get(name)?.sockets.size ?? 0;
+  }
+
+  /** Graceful shutdown: write pending edits before TypeORM closes the connection. */
+  async onModuleDestroy(): Promise<void> {
+    for (const room of this.rooms.values()) clearTimeout(room.timer);
+    await Promise.all([...this.rooms.values()].map((room) => this.flush(room)));
+  }
+
+  /**
+   * Registers the socket and sends it the current content. Runs under the write lock so
+   * the content read and the registration are atomic with respect to every write/broadcast.
+   * `keyVersion` is the one the caller authorized against; a change since then means 4409.
+   */
+  join(name: string, socket: WebSocket, protectedPad: boolean, keyVersion: number): Promise<void> {
+    return this.lock.run(async () => {
+      const pad = await this.dataSource.getRepository(Pad).findOneBy({ name });
+      const updates = protectedPad
+        ? await this.dataSource
+            .getRepository(PadUpdate)
+            .find({ where: { padName: name }, order: { seq: 'ASC' } })
+        : [];
+      if ((pad?.verifier != null) !== protectedPad || (pad?.keyVersion ?? 0) !== keyVersion) {
+        socket.close(CLOSE.KEY_CHANGED);
+        return;
+      }
+      if (socket.readyState !== WebSocket.OPEN) return; // left while we were reading
+
+      let room = this.rooms.get(name);
+      if (room && room.keyVersion !== keyVersion) {
+        this.closeAll(name, CLOSE.KEY_CHANGED); // stale room from before a key change
+        room = undefined;
+      }
+      if (!room) {
+        room = { name, keyVersion, sockets: new Set() };
+        if (!protectedPad) room.doc = this.openDoc(room, pad?.state ?? null);
+        this.rooms.set(name, room);
+      }
+      room.sockets.add(socket);
+      this.roomOf.set(socket, room);
+      socket.once('close', () => this.leave(socket));
+
+      if (room.doc) {
+        socket.send(frame(MSG.SYNC, (e) => syncProtocol.writeSyncStep1(e, room.doc!)));
+        socket.send(frame(MSG.SYNC, (e) => syncProtocol.writeSyncStep2(e, room.doc!)));
+      } else {
+        socket.send(
+          frame(MSG.ENC_INIT, (e) => {
+            encoding.writeVarUint8Array(e, pad?.snapshot ?? new Uint8Array());
+            encoding.writeVarUint(e, updates.length);
+            for (const u of updates) encoding.writeVarUint8Array(e, u.data);
+          }),
+        );
+      }
+      this.sendPresence(room);
+    });
+  }
+
+  /** Handles one client message; never throws. */
+  async receive(socket: WebSocket, data: Buffer): Promise<void> {
+    const room = this.roomOf.get(socket);
+    if (!room) return;
+    try {
+      const d = decoding.createDecoder(new Uint8Array(data));
+      const type = decoding.readVarUint(d);
+      if (type === MSG.SYNC && room.doc) {
+        if (data.length > maxBytes()) throw new TooLarge();
+        const reply = encoding.createEncoder();
+        encoding.writeVarUint(reply, MSG.SYNC);
+        syncProtocol.readSyncMessage(d, reply, room.doc, socket);
+        if (encoding.length(reply) > 1) socket.send(encoding.toUint8Array(reply));
+      } else if (type === MSG.ENC_UPDATE && !room.doc) {
+        await this.storeUpdate(room, socket, readData(d));
+      } else if (type === MSG.ENC_SNAPSHOT && !room.doc) {
+        const upToSeq = decoding.readVarUint(d);
+        await this.storeSnapshot(room, upToSeq, readData(d));
+      } else {
+        socket.close(1003);
+      }
+    } catch (err) {
+      if (err instanceof TooLarge) return socket.close(CLOSE.TOO_LARGE);
+      this.logger.warn(`Dropping a client of "${room.name}": ${String(err)}`);
+      socket.close(1003);
+    }
+  }
+
+  leave(socket: WebSocket): void {
+    const room = this.roomOf.get(socket);
+    if (!room) return;
+    this.roomOf.delete(socket);
+    room.sockets.delete(socket);
+    if (room.compactor === socket) room.compactor = undefined;
+    if (room.sockets.size) return this.sendPresence(room);
+
+    this.rooms.delete(room.name);
+    if (room.doc) {
+      clearTimeout(room.timer);
+      void this.flush(room).finally(() => room.doc?.destroy());
+    }
+  }
+
+  /** Key change: drop the room WITHOUT flushing its readable Doc, then close every socket. */
+  closeAll(name: string, code: number): void {
+    const room = this.rooms.get(name);
+    if (!room) return;
+    room.dead = true;
+    clearTimeout(room.timer);
+    room.doc?.destroy();
+    this.rooms.delete(name);
+    // Unmapped first, so the 'close' events these trigger find no room to flush.
+    for (const s of room.sockets) this.roomOf.delete(s);
+    for (const s of room.sockets) s.close(code);
+  }
+
+  private openDoc(room: Room, state: Buffer | null): Y.Doc {
+    const doc = new Y.Doc();
+    if (state) Y.applyUpdate(doc, state);
+    doc.on('update', (update: Uint8Array, origin: unknown) => {
+      const msg = frame(MSG.SYNC, (e) => syncProtocol.writeUpdate(e, update));
+      for (const s of room.sockets) if (s !== origin) s.send(msg);
+      clearTimeout(room.timer);
+      room.timer = setTimeout(() => void this.flush(room), FLUSH_DEBOUNCE_MS);
+    });
+    return doc;
+  }
+
+  private flush(room: Room): Promise<void> {
+    return this.lock
+      .run(async () => {
+        if (room.dead || !room.doc) return;
+        const state = Buffer.from(Y.encodeStateAsUpdate(room.doc));
+        const repo = this.dataSource.getRepository(Pad);
+        const pad = await repo.findOneBy({ name: room.name });
+        if (!pad) return void (await repo.insert({ name: room.name, state }));
+        // Never write readable state over a pad that became protected or changed key.
+        if (pad.verifier === null && pad.keyVersion === room.keyVersion) {
+          await repo.update({ name: room.name }, { state });
+        }
+      })
+      .catch((err: unknown) => this.logger.error(`Flush of "${room.name}" failed`, err));
+  }
+
+  private storeUpdate(room: Room, from: WebSocket, data: Buffer): Promise<void> {
+    return this.lock.run(async () => {
+      const seq = await this.dataSource.transaction(async (m) => {
+        const pad = await m.findOneBy(Pad, { name: room.name });
+        if (!pad?.verifier || pad.keyVersion !== room.keyVersion) return null;
+        await m.insert(PadUpdate, { padName: room.name, seq: pad.nextSeq, data });
+        await m.update(Pad, { name: room.name }, { nextSeq: pad.nextSeq + 1 });
+        return pad.nextSeq;
+      });
+      if (seq === null || room.dead) return;
+
+      const msg = frame(MSG.ENC_UPDATE, (e) => encoding.writeVarUint8Array(e, data));
+      for (const s of room.sockets) if (s !== from) s.send(msg);
+
+      if (room.compactor) return;
+      const pending = await this.dataSource
+        .getRepository(PadUpdate)
+        .countBy({ padName: room.name });
+      if (pending >= COMPACT_AFTER) {
+        room.compactor = from;
+        from.send(frame(MSG.COMPACT_REQ, (e) => encoding.writeVarUint(e, seq)));
+      }
+    });
+  }
+
+  private storeSnapshot(room: Room, upToSeq: number, snapshot: Buffer): Promise<void> {
+    return this.lock.run(async () => {
+      const applied = await this.dataSource.transaction(async (m) => {
+        const pad = await m.findOneBy(Pad, { name: room.name });
+        if (!pad?.verifier || pad.keyVersion !== room.keyVersion) return false;
+        // Compaction always deletes seq <= upToSeq, so a snapshot that covers no stored
+        // update is stale (<= one already applied); upToSeq >= nextSeq covers the future.
+        const covered = await m.countBy(PadUpdate, {
+          padName: room.name,
+          seq: LessThanOrEqual(upToSeq),
+        });
+        if (upToSeq >= pad.nextSeq || covered === 0) return false;
+        await m.update(Pad, { name: room.name }, { snapshot });
+        await m.delete(PadUpdate, { padName: room.name, seq: LessThanOrEqual(upToSeq) });
+        return true;
+      });
+      if (applied) room.compactor = undefined;
+    });
+  }
+
+  private sendPresence(room: Room): void {
+    const msg = frame(MSG.PRESENCE, (e) => encoding.writeVarUint(e, room.sockets.size));
+    for (const s of room.sockets) s.send(msg);
+  }
+}

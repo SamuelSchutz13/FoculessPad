@@ -69,6 +69,16 @@ describe('Pads (e2e)', () => {
     expect(res.status).toBe(200);
   });
 
+  it('413 for a JSON body over the body limit', async () => {
+    const res = await call('toobig/password', 'PUT', {
+      salt,
+      authKey,
+      snapshot: b64(env.maxPadSizeKb * 1024 * 2, 3),
+    });
+    expect(res.status).toBe(413);
+    expect((await res.json()).statusCode).toBe(413);
+  });
+
   it('401 on a wrong key, then 429 once the unlock throttle is exceeded', async () => {
     await call('locked/password', 'PUT', { salt, authKey, snapshot: b64(4, 1) });
     const wrong = { authKey: b64(32, 9) };

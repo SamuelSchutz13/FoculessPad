@@ -6,6 +6,7 @@ import { Pad } from './pad.entity';
 import { PadsService } from './pads.service';
 import { SessionTokenService } from './session-token.service';
 import { UnlockLockout } from './unlock-lockout';
+import { WriteLock } from './write-lock';
 
 const sha = (b: Buffer) => createHash('sha256').update(b).digest();
 const authKey = Buffer.alloc(32, 1);
@@ -28,7 +29,7 @@ describe('PadsService', () => {
     await ds.initialize();
     tokens = new SessionTokenService();
     lockout = new UnlockLockout();
-    service = new PadsService(ds, tokens, lockout);
+    service = new PadsService(ds, tokens, lockout, new WriteLock());
   });
 
   afterEach(() => ds.destroy());
@@ -82,5 +83,15 @@ describe('PadsService', () => {
     expect(pad).toMatchObject({ verifier: null, salt: null, snapshot: null, keyVersion: 2 });
     expect(pad?.state?.toString()).toBe('plain');
     expect(hook).toHaveBeenCalledWith('a');
+  });
+
+  it('a throwing onKeyChange hook does not fail a committed password change', async () => {
+    service.onKeyChange = () => {
+      throw new Error('boom');
+    };
+    await expect(service.setPassword('a', { salt, authKey, snapshot })).resolves.toHaveProperty(
+      'token',
+    );
+    expect((await service.findOrNull('a'))?.verifier).not.toBeNull();
   });
 });
