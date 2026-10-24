@@ -2,6 +2,7 @@ import { EventEmitter } from 'node:events';
 import * as decoding from 'lib0/decoding';
 import * as encoding from 'lib0/encoding';
 import { DataSource } from 'typeorm';
+import { env } from '../../config/env';
 import type { WebSocket } from 'ws';
 import * as syncProtocol from 'y-protocols/sync';
 import * as Y from 'yjs';
@@ -167,5 +168,60 @@ describe('RoomsService', () => {
     await recv(s, encSnapshot(200, 'again'));
     expect((await pads.findOrNull('c'))?.snapshot?.toString()).toBe('snap');
     expect(await seqs('c')).toEqual([[201, 'u201']]);
+  });
+
+  describe('with a 4 KB pad limit', () => {
+    const original = env.maxPadSizeKb;
+    beforeEach(() => (env.maxPadSizeKb = 4));
+    afterEach(() => (env.maxPadSizeKb = original));
+
+    it('open pad: small edits close the sender with 4413 once the Doc would pass the limit', async () => {
+      const a = await join('big', false, 0);
+      const b = await join('big', false, 0);
+      const local = new Y.Doc();
+      let sent = 0;
+      local.on('update', (u: Uint8Array) => {
+        sent++;
+        void recv(
+          a,
+          msg(MSG.SYNC, (e) => syncProtocol.writeUpdate(e, u)),
+        );
+      });
+      for (let i = 0; i < 40 && a.closeCode === undefined; i++) {
+        local.getText('t').insert(0, 'x'.repeat(200)); // each edit far under the per-message limit
+        await drain();
+      }
+      expect(a.closeCode).toBe(CLOSE.TOO_LARGE);
+      expect(sent).toBeGreaterThan(5);
+
+      // b only ever saw accepted edits, and the room's Doc is within the limit.
+      const seen = new Y.Doc();
+      for (const m of b.sent) {
+        const d = decoding.createDecoder(m);
+        if (decoding.readVarUint(d) !== MSG.SYNC) continue;
+        if (decoding.readVarUint(d) === syncProtocol.messageYjsSyncStep1) continue;
+        Y.applyUpdate(seen, decoding.readVarUint8Array(d));
+      }
+      expect(seen.getText('t').length).toBeLessThan(local.getText('t').length);
+
+      b.close(1000); // room empties -> flush
+      await drain();
+      const state = (await pads.findOrNull('big'))?.state;
+      expect(state!.length).toBeLessThanOrEqual(4 * 1024);
+      expect(textOf(state)).toBe(seen.getText('t').toString());
+    });
+
+    it('protected pad: snapshot + pending past 2x the limit closes with 4413, past 1x asks to compact', async () => {
+      await pads.setPassword('pc', keys);
+      const s = await join('pc', true, 1);
+      const kb = (n: number) =>
+        msg(MSG.ENC_UPDATE, (e) => encoding.writeVarUint8Array(e, Buffer.alloc(1000, n)));
+      for (let i = 1; i <= 8; i++) await recv(s, kb(i));
+      expect(s.closeCode).toBeUndefined();
+      expect(s.types()).toContain(MSG.COMPACT_REQ);
+      await recv(s, kb(9));
+      expect(s.closeCode).toBe(CLOSE.TOO_LARGE);
+      expect(await seqs('pc')).toHaveLength(8);
+    });
   });
 });

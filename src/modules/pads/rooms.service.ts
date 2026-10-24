@@ -14,6 +14,11 @@ import { WriteLock } from './write-lock';
 
 const FLUSH_DEBOUNCE_MS = 2000;
 const COMPACT_AFTER = 200;
+/**
+ * Upper bound of how much an update grows the encoded Doc: splitting existing structs can cost
+ * more than the update itself (measured up to ~6.5x for a crafted delete-every-other-char).
+ */
+const growthBound = (update: Uint8Array) => update.length * 16 + 128;
 const maxBytes = () => env.maxPadSizeKb * 1024;
 
 interface Room {
@@ -25,6 +30,8 @@ interface Room {
   timer?: NodeJS.Timeout;
   /** Set by closeAll: the Doc must never be written again. */
   dead?: boolean;
+  /** Open pads: upper bound of Y.encodeStateAsUpdate(doc).length. */
+  size: number;
   /** Protected pads: a COMPACT_REQ is outstanding with this socket. */
   compactor?: WebSocket;
 }
@@ -91,7 +98,7 @@ export class RoomsService implements OnModuleDestroy {
         room = undefined;
       }
       if (!room) {
-        room = { name, keyVersion, sockets: new Set() };
+        room = { name, keyVersion, sockets: new Set(), size: 0 };
         if (!protectedPad) room.doc = this.openDoc(room, pad?.state ?? null);
         this.rooms.set(name, room);
       }
@@ -124,10 +131,15 @@ export class RoomsService implements OnModuleDestroy {
       const type = decoding.readVarUint(d);
       if (type === MSG.SYNC && room.doc) {
         if (data.length > maxBytes()) throw new TooLarge();
-        const reply = encoding.createEncoder();
-        encoding.writeVarUint(reply, MSG.SYNC);
-        syncProtocol.readSyncMessage(d, reply, room.doc, socket);
-        if (encoding.length(reply) > 1) socket.send(encoding.toUint8Array(reply));
+        if (decoding.readVarUint(d) === syncProtocol.messageYjsSyncStep1) {
+          const reply = encoding.createEncoder();
+          encoding.writeVarUint(reply, MSG.SYNC);
+          syncProtocol.readSyncStep1(d, reply, room.doc);
+          socket.send(encoding.toUint8Array(reply));
+        } else {
+          // syncStep2 and update both carry a Yjs update.
+          this.applyCapped(room, decoding.readVarUint8Array(d), socket);
+        }
       } else if (type === MSG.ENC_UPDATE && !room.doc) {
         await this.storeUpdate(room, socket, readData(d));
       } else if (type === MSG.ENC_SNAPSHOT && !room.doc) {
@@ -171,9 +183,31 @@ export class RoomsService implements OnModuleDestroy {
     for (const s of room.sockets) s.close(code);
   }
 
+  /**
+   * Applies an update only if the pad stays within maxPadSizeKb, so an over-limit edit is
+   * never broadcast nor persisted. room.size is an upper bound (see growthBound), re-anchored to
+   * the exact size on every flush; only when the bound crosses the limit is the exact size
+   * measured, on a copy (O(doc), so not done for every keystroke).
+   */
+  private applyCapped(room: Room, update: Uint8Array, origin: WebSocket): void {
+    const doc = room.doc!;
+    let next = room.size + growthBound(update);
+    if (next > maxBytes()) {
+      const copy = new Y.Doc();
+      Y.applyUpdate(copy, Y.encodeStateAsUpdate(doc));
+      Y.applyUpdate(copy, update);
+      next = Y.encodeStateAsUpdate(copy).length;
+      copy.destroy();
+      if (next > maxBytes()) throw new TooLarge();
+    }
+    Y.applyUpdate(doc, update, origin);
+    room.size = next;
+  }
+
   private openDoc(room: Room, state: Buffer | null): Y.Doc {
     const doc = new Y.Doc();
     if (state) Y.applyUpdate(doc, state);
+    room.size = Y.encodeStateAsUpdate(doc).length;
     doc.on('update', (update: Uint8Array, origin: unknown) => {
       const msg = frame(MSG.SYNC, (e) => syncProtocol.writeUpdate(e, update));
       for (const s of room.sockets) if (s !== origin) s.send(msg);
@@ -188,6 +222,7 @@ export class RoomsService implements OnModuleDestroy {
       .run(async () => {
         if (room.dead || !room.doc) return;
         const state = Buffer.from(Y.encodeStateAsUpdate(room.doc));
+        room.size = state.length;
         const repo = this.dataSource.getRepository(Pad);
         const pad = await repo.findOneBy({ name: room.name });
         if (!pad) return void (await repo.insert({ name: room.name, state }));
@@ -201,14 +236,24 @@ export class RoomsService implements OnModuleDestroy {
 
   private storeUpdate(room: Room, from: WebSocket, data: Buffer): Promise<void> {
     return this.lock.run(async () => {
-      const seq = await this.dataSource.transaction(async (m) => {
+      const stored = await this.dataSource.transaction(async (m) => {
         const pad = await m.findOneBy(Pad, { name: room.name });
         if (!pad?.verifier || pad.keyVersion !== room.keyVersion) return null;
+        const pending = await m
+          .createQueryBuilder(PadUpdate, 'u')
+          .select('COALESCE(SUM(LENGTH(u.data)), 0)', 'bytes')
+          .where('u.padName = :name', { name: room.name })
+          .getRawOne<{ bytes: number }>();
+        const bytes = (pad.snapshot?.length ?? 0) + Number(pending?.bytes ?? 0) + data.length;
+        // Snapshot + pending may reach 2x the limit: past 1x a compaction is requested, which
+        // shrinks it back; refusing at 1x would leave no room for that compaction to happen.
+        if (bytes > 2 * maxBytes()) throw new TooLarge();
         await m.insert(PadUpdate, { padName: room.name, seq: pad.nextSeq, data });
         await m.update(Pad, { name: room.name }, { nextSeq: pad.nextSeq + 1 });
-        return pad.nextSeq;
+        return { seq: pad.nextSeq, bytes };
       });
-      if (seq === null || room.dead) return;
+      if (stored === null || room.dead) return;
+      const { seq, bytes } = stored;
 
       const msg = frame(MSG.ENC_UPDATE, (e) => encoding.writeVarUint8Array(e, data));
       for (const s of room.sockets) if (s !== from) s.send(msg);
@@ -217,7 +262,7 @@ export class RoomsService implements OnModuleDestroy {
       const pending = await this.dataSource
         .getRepository(PadUpdate)
         .countBy({ padName: room.name });
-      if (pending >= COMPACT_AFTER) {
+      if (pending >= COMPACT_AFTER || bytes > maxBytes()) {
         room.compactor = from;
         from.send(frame(MSG.COMPACT_REQ, (e) => encoding.writeVarUint(e, seq)));
       }

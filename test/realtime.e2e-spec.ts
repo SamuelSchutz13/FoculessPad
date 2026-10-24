@@ -1,5 +1,7 @@
 // Throwaway DB: must be set before the app (and env.ts) is imported.
 process.env.DATABASE_PATH = ':memory:';
+// Small limit so the total-size cap is reachable with a few edits.
+process.env.MAX_PAD_SIZE_KB = '16';
 
 import type { NestExpressApplication } from '@nestjs/platform-express';
 import { Test } from '@nestjs/testing';
@@ -248,5 +250,28 @@ describe('Realtime (e2e)', () => {
     expect(a.closeCode).toBe(4413);
     expect((await fetch(`${api}/health`)).status).toBe(200);
     expect(await ds.getRepository(PadUpdate).countBy({ padName: 'huge' })).toBe(0);
+  });
+
+  it('open pad: many small edits end in 4413; others never see the over-limit edit', async () => {
+    const a = yPeer('grow');
+    const b = yPeer('grow');
+    await until(() => presence(a) === 2 && presence(b) === 2);
+    for (let i = 0; i < 100 && a.closeCode === undefined; i++) {
+      a.doc.getText('t').insert(0, 'y'.repeat(1000)); // each far under the per-message limit
+      await new Promise((r) => setTimeout(r, 20));
+    }
+    await until(() => a.closeCode !== undefined);
+    expect(a.closeCode).toBe(4413);
+    expect(b.closeCode).toBeUndefined();
+    expect(b.text().length).toBeLessThan(a.text().length);
+    expect(b.text().length).toBeLessThanOrEqual(env.maxPadSizeKb * 1024);
+
+    b.ws.close();
+    await until(async () => (await row('grow'))?.state != null);
+    const state = (await row('grow'))!.state!;
+    expect(state.length).toBeLessThanOrEqual(env.maxPadSizeKb * 1024);
+    const persisted = new Y.Doc();
+    Y.applyUpdate(persisted, state);
+    expect(persisted.getText('t').toString()).toBe(b.text());
   });
 });

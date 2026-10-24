@@ -1,4 +1,5 @@
 import type { IncomingMessage } from 'node:http';
+import { Logger } from '@nestjs/common';
 import { type OnGatewayConnection, WebSocketGateway } from '@nestjs/websockets';
 import type { WebSocket } from 'ws';
 import { env } from '../../config/env';
@@ -14,6 +15,8 @@ const MAX_QUEUED_MESSAGES = 1000;
 // update just over the limit reach RoomsService, which answers 4413.
 @WebSocketGateway({ path: '/ws', maxPayload: env.maxPadSizeKb * 1024 + 4096 })
 export class PadsGateway implements OnGatewayConnection {
+  private readonly logger = new Logger(PadsGateway.name);
+
   constructor(
     private readonly pads: PadsService,
     private readonly tokens: SessionTokenService,
@@ -24,7 +27,10 @@ export class PadsGateway implements OnGatewayConnection {
 
   handleConnection(socket: WebSocket, req: IncomingMessage): void {
     // Messages are chained behind the join, in order, so none sent early are lost.
-    let chain: Promise<unknown> = this.connect(socket, req).catch(() => socket.close(1011));
+    let chain: Promise<unknown> = this.connect(socket, req).catch((err: unknown) => {
+      this.logger.error('WebSocket join failed', err instanceof Error ? err.stack : err);
+      socket.close(1011);
+    });
     let queued = 0;
     socket.on('message', (data: Buffer) => {
       // A client flooding faster than we write would otherwise grow this queue without bound.

@@ -20,5 +20,6 @@ export const CLOSE = {
   INVALID_NAME: 4400,
   UNAUTHORIZED: 4401,
   KEY_CHANGED: 4409,
+  /** Also treat 1009 (ws maxPayload: frame refused before it is read) as "too large". */
   TOO_LARGE: 4413,
 } as const;
